@@ -8,12 +8,15 @@ import { basename, join, relative, resolve, sep } from "node:path";
 import {
   createFolder,
   deleteEntry,
+  downloadToBytes,
   downloadToFile,
   formatBytes,
+  listAllObjectsUnderPrefix,
   listLevel,
   uploadFile,
   type R2Entry,
 } from "../lib/r2.js";
+import { ZipWriter } from "../lib/zip.js";
 
 interface AppProps {
   client: S3Client;
@@ -313,22 +316,134 @@ export function App({ client }: AppProps): React.ReactElement {
         : cursorEntry
           ? [cursorEntry]
           : [];
-    if (targets.length === 0 || bucket === null) {
-      if (bucket === null) showToast("Enter a bucket first, then download files.");
+    if (targets.length === 0) return;
+    if (bucket === null) {
+      showToast("Enter a bucket first, then download folders or files.");
       return;
     }
+
+    const folders = targets.filter((t) => t.type === "folder");
     const files = targets.filter((t) => t.type === "file");
-    if (files.length !== targets.length) {
-      showToast("Only files can be downloaded — enter folders to pick files.");
+
+    // Plain file selection keeps the old behaviour: save each file as-is.
+    if (folders.length === 0) {
+      setBusy(
+        `Downloading ${files.length} file${files.length === 1 ? "" : "s"}…`
+      );
+      try {
+        let done = 0;
+        for (const file of files) {
+          const name = file.name.replace(/\/$/, "") || basename(file.key);
+          setBusy(
+            `Downloading ${done + 1}/${files.length} — ${name}…`
+          );
+          await downloadToFile(client, bucket, file.key, join(process.cwd(), name));
+          done += 1;
+        }
+        showToast(
+          `Downloaded ${files.length} file${files.length === 1 ? "" : "s"} to ${process.cwd()}.`
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        showToast(`Download failed: ${message}`);
+      } finally {
+        setBusy(null);
+        disarmDelete();
+      }
       return;
     }
-    setBusy(`Downloading ${files.length} file${files.length === 1 ? "" : "s"}…`);
+
+    // Folders (mixed with files, if selected) are streamed into one archive.
+    const folderTarget =
+      targets.length === 1 && targets[0]?.type === "folder"
+        ? targets[0]
+        : null;
+    const singleFolder = folderTarget !== null;
+    const zipName = folderTarget
+      ? `${folderTarget.name.replace(/\/$/, "")}.zip`
+      : "r2n-selection.zip";
+    const destPath = join(process.cwd(), zipName);
+
+    interface ZipItem {
+      zipPath: string;
+      key: string;
+      lastModified?: Date;
+    }
+    const items: ZipItem[] = [];
+    let capped = false;
+
+    setBusy(
+      `Listing ${folders.length} folder${folders.length === 1 ? "" : "s"}…`
+    );
     try {
-      for (const file of files) {
-        const name = file.name.replace(/\/$/, "") || basename(file.key);
-        await downloadToFile(client, bucket, file.key, join(process.cwd(), name));
+      for (const target of targets) {
+        if (target.type === "file") {
+          items.push({
+            zipPath: target.name,
+            key: target.key,
+            lastModified: target.lastModified,
+          });
+          continue;
+        }
+        const folderName = target.name.replace(/\/$/, "");
+        const { objects, capped: folderCapped } =
+          await listAllObjectsUnderPrefix(client, bucket, target.key);
+        capped ||= folderCapped;
+        for (const object of objects) {
+          const relativeKey = object.key.slice(target.key.length);
+          if (!relativeKey) continue; // The folder placeholder itself.
+          items.push({
+            zipPath: `${folderName}/${relativeKey}`,
+            key: object.key,
+            lastModified: object.lastModified,
+          });
+        }
       }
-      showToast(`Downloaded ${files.length} file${files.length === 1 ? "" : "s"} to ${process.cwd()}.`);
+
+      if (items.length === 0) {
+        showToast(
+          singleFolder
+            ? `${folderTarget.name.replace(/\/$/, "")}/ is empty — nothing to zip.`
+            : "Selection is empty — nothing to zip."
+        );
+        return;
+      }
+
+      const writer = await ZipWriter.create(destPath);
+      let done = 0;
+      let fileCount = 0;
+      let totalBytes = 0;
+      try {
+        for (const item of items) {
+          setBusy(
+            `Zipping ${zipName} — ${done + 1}/${items.length} (${formatBytes(totalBytes)})…`
+          );
+          if (item.zipPath.endsWith("/")) {
+            await writer.addDirectory(
+              item.zipPath,
+              item.lastModified ?? new Date()
+            );
+          } else {
+            const data = await downloadToBytes(client, bucket, item.key);
+            await writer.addFile(
+              item.zipPath,
+              data,
+              item.lastModified ?? new Date()
+            );
+            totalBytes += data.byteLength;
+            fileCount += 1;
+          }
+          done += 1;
+        }
+        await writer.close();
+      } catch (err) {
+        await writer.abort();
+        throw err;
+      }
+
+      showToast(
+        `Downloaded ${zipName} (${fileCount} file${fileCount === 1 ? "" : "s"}, ${formatBytes(totalBytes)}) to ${process.cwd()}.${capped ? " List capped at 10,000 objects." : ""}`
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       showToast(`Download failed: ${message}`);
@@ -610,7 +725,7 @@ export function App({ client }: AppProps): React.ReactElement {
       <Box borderStyle="single" paddingX={1} marginTop={1}>
         <Text dimColor>
           ↑↓ move · →/Enter open · ← back · Space select · a all · ⌫⌫ delete · u
-          upload · n folder · o download · q quit
+          upload · n folder · o download (folders → .zip) · q quit
         </Text>
       </Box>
     </Box>

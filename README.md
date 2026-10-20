@@ -32,7 +32,7 @@ before saving. On success it prints `Run 'r2n' to browse`.
 | `Backspace` twice | Delete selected (or cursor item); first press arms, `Esc` cancels |
 | `u` | Upload a file — or a folder (recreated here with all its files); runs in the background with progress in the status footer |
 | `n` | Create folder |
-| `o` | Download selected files to cwd |
+| `o` | Download selected files to cwd; folders (or mixed selections) are zipped into `<folder>.zip` / `r2n-selection.zip` |
 | `r` | Refresh |
 | `q` | Quit |
 

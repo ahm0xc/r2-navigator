@@ -179,14 +179,20 @@ export async function deleteKeys(
   return { deleted };
 }
 
-/** Collect every object key under a prefix (for folder deletes). */
-export async function listAllKeysUnderPrefix(
+export interface R2ObjectSummary {
+  key: string;
+  size?: number;
+  lastModified?: Date;
+}
+
+/** Collect every object under a prefix, including folder placeholder keys. */
+export async function listAllObjectsUnderPrefix(
   client: S3Client,
   bucket: string,
   prefix: string,
   cap = 10000
-): Promise<{ keys: string[]; capped: boolean }> {
-  const keys: string[] = [];
+): Promise<{ objects: R2ObjectSummary[]; capped: boolean }> {
+  const objects: R2ObjectSummary[] = [];
   let continuation: string | undefined;
   for (;;) {
     const res = await client.send(
@@ -198,8 +204,13 @@ export async function listAllKeysUnderPrefix(
       })
     );
     for (const obj of res.Contents ?? []) {
-      if (obj.Key) keys.push(obj.Key);
-      if (keys.length >= cap) return { keys, capped: true };
+      if (!obj.Key) continue;
+      objects.push({
+        key: obj.Key,
+        size: obj.Size,
+        lastModified: obj.LastModified,
+      });
+      if (objects.length >= cap) return { objects, capped: true };
     }
     if (res.IsTruncated && res.NextContinuationToken) {
       continuation = res.NextContinuationToken;
@@ -207,7 +218,23 @@ export async function listAllKeysUnderPrefix(
       break;
     }
   }
-  return { keys, capped: false };
+  return { objects, capped: false };
+}
+
+/** Collect every object key under a prefix (for folder deletes). */
+export async function listAllKeysUnderPrefix(
+  client: S3Client,
+  bucket: string,
+  prefix: string,
+  cap = 10000
+): Promise<{ keys: string[]; capped: boolean }> {
+  const { objects, capped } = await listAllObjectsUnderPrefix(
+    client,
+    bucket,
+    prefix,
+    cap
+  );
+  return { keys: objects.map((obj) => obj.key), capped };
 }
 
 /** Delete a single browsable entry. Folders expand to all keys under the prefix. */
@@ -232,6 +259,22 @@ export async function deleteEntry(
   return { deleted, capped };
 }
 
+export async function downloadToBytes(
+  client: S3Client,
+  bucket: string,
+  key: string
+): Promise<Uint8Array> {
+  const res = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key })
+  );
+  const body = res.Body;
+  if (!body) throw new Error("Empty response body from R2");
+  // Body is a stream in Node; convert to bytes.
+  return (
+    body as unknown as { transformToByteArray: () => Promise<Uint8Array> }
+  ).transformToByteArray();
+}
+
 export async function downloadToFile(
   client: S3Client,
   bucket: string,
@@ -239,13 +282,7 @@ export async function downloadToFile(
   destPath: string
 ): Promise<void> {
   const { writeFile } = await import("node:fs/promises");
-  const res = await client.send(
-    new GetObjectCommand({ Bucket: bucket, Key: key })
-  );
-  const body = res.Body;
-  if (!body) throw new Error("Empty response body from R2");
-  // Body is a stream in Node; convert to bytes.
-  const bytes = await (body as unknown as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray();
+  const bytes = await downloadToBytes(client, bucket, key);
   await writeFile(destPath, bytes);
 }
 
