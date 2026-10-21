@@ -5,8 +5,9 @@ import { runAuth } from "./commands/auth.js";
 import { loadCredentials } from "./lib/config.js";
 import { createR2Client } from "./lib/r2.js";
 import { App } from "./ui/App.js";
+import pkg from "../package.json" with { type: "json" };
 
-const VERSION = "0.1.0";
+const VERSION = pkg.version;
 
 async function launchNavigator(): Promise<void> {
   const loaded = await loadCredentials();
