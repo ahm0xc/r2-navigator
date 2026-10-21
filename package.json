@@ -1,6 +1,6 @@
 {
   "name": "@ahm0xc/r2-navigator",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Interactive terminal navigator for Cloudflare R2 buckets",
   "type": "module",
   "bin": {
